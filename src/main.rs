@@ -6,7 +6,8 @@ use std::str::Chars;
 use reqwest::Client;
 use select::{
     document::Document,
-    predicate::{Class, Name, Predicate},
+    node::Node,
+    predicate::{Class, Name, Predicate, Text},
 };
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +26,7 @@ struct Bank {
     name: String,
     phonetic: String,
     code: String,
+    #[serde(skip)]
     search_param: String,
     branches: Vec<Branch>,
 }
@@ -39,46 +41,56 @@ impl Bank {
             branches: Vec::new(),
         }
     }
-}
 
-async fn fetch_branches(bank: Bank, client: Client, search_key: char) -> Result<Vec<Branch>, Error> {
-    let html = client
-        .post("https://zengin.ajtw.net/shitenmeisai.php")
-        .form(&[("sm", search_key.to_string()), ("pz", bank.search_param.clone())])
-        .send()
-        .await
-        .map_err(Error::FechBranchError)?
-        .text()
-        .await
-        .unwrap();
-    Ok(parse_branches(html))
-}
+    async fn fetch_branches(&self, client: Client, search_key: char) -> Result<Vec<Branch>, Error> {
+        let html = client
+            .post("https://zengin.ajtw.net/shitenmeisai.php")
+            .form(&[("sm", search_key.to_string()), ("pz", self.search_param.clone())])
+            .send()
+            .await
+            .map_err(Error::FechBranchError)?
+            .text()
+            .await
+            .unwrap();
+        Ok(parse_branches(html))
+    }
 
-async fn fetch_all_branches(bank: Bank, client: Client, search_keys: Chars<'static>) -> Vec<Branch> {
-    let future = futures::future::join_all(
-        search_keys
-            .map(|search_key| {
-                let client = client.clone();
-                let bank = bank.clone();
-                tokio::spawn( async move {
-                    fetch_branches(bank, client, search_key).await
+    async fn fetch_all_branches(mut self, client: Client, search_keys: Chars<'static>) -> Result<Self, Error>{
+        let future = futures::future::join_all(
+            search_keys
+                .clone()
+                .map(|search_key| {
+                    let client = client.clone();
+                    let bank = self.clone();
+                    tokio::spawn( async move {
+                        bank.fetch_branches(client, search_key).await
+                    })
                 })
-            })
-    );
-    future
-        .await
-        .into_iter()
-        .filter(|task_result| task_result.is_ok())
-        .map(|task_result| task_result.unwrap().unwrap())
-        .flatten()
-        .collect::<Vec<Branch>>()
+        );
+        self.branches = future
+            .await
+            .into_iter()
+            .filter(|task_result| task_result.is_ok())
+            .map(|task_result| task_result.unwrap().unwrap())
+            .flatten()
+            .collect::<Vec<Branch>>();
+        Ok(self.clone())
+    }
+}
 
+fn filter_blank(node: &Node) -> bool {
+    let text = node.find(Text).next();
+    if text.is_none() {
+        return false;
+    }
+    text.unwrap().text() != "該当するデータはありません"
 }
 
 fn parse_branches(html: String) -> Vec<Branch> {
     let document = Document::from(html.as_str());
     document
         .find(Name("tbody").descendant(Name("tr")))
+        .filter(filter_blank)
         .map(|node| {
             let mut datarows = node.children();
             let name = datarows.next().unwrap().text();
@@ -117,6 +129,7 @@ fn parse_bank_list(html: String) -> Vec<Bank> {
     let document = Document::from(html.as_str());
     document
         .find(Class("j0").descendant(Name("tbody").descendant(Name("tr"))))
+        .filter(filter_blank)
         .map(|node| {
             let mut datarows = node.children();
             let name = datarows.next().unwrap().text();
@@ -142,23 +155,13 @@ fn parse_bank_list(html: String) -> Vec<Bank> {
 }
 
 fn all_search_keys() -> Chars<'static> {
-    "
-    あいうえお
-    かきくけこ
-    さしすせそ
-    たちつてと
-    なにぬねの
-    はひふへほ
-    まみむめも
-    やゆよ
-    らりるれろ
-    わ
-    ".chars()
+    "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわ".chars()
 }
 
 async fn fetch_all_bank_list(client: Client, search_keys: Chars<'static>) -> Vec<Bank> {
     let future = futures::future::join_all(
         search_keys
+            .clone()
             .map(|search_key| {
                 let client = client.clone();
                 tokio::spawn(async move {
@@ -175,7 +178,7 @@ async fn fetch_all_bank_list(client: Client, search_keys: Chars<'static>) -> Vec
         .collect::<Vec<Bank>>()
 }
 
-const BANK_LIST_JSON: &'static str = "dest/bank_list.json";
+const BANK_LIST_JSON: &'static str = "dest/banks.json";
 
 fn save_bank_list(bank_list: &Vec<Bank>) {
     let dest_path = Path::new(BANK_LIST_JSON);
@@ -189,21 +192,33 @@ fn load_bank_list() -> Vec<Bank> {
     serde_json::from_reader(&file).unwrap()
 }
 
+async fn fetch_bulky(client: Client, search_keys: Chars<'static>) -> Vec<Bank> {
+    let banks = fetch_all_bank_list(client.clone(), search_keys.clone()).await;
+    let future = futures::future::join_all(
+        banks
+            .into_iter()
+            .map(|bank| {
+                let client = client.clone();
+                let search_keys = search_keys.clone();
+                tokio::spawn(async move {
+                    bank.fetch_all_branches(client, search_keys).await.unwrap()
+                })
+            })
+    );
+    future
+        .await
+        .into_iter()
+        .map(|task_result| {
+            task_result.unwrap()
+        })
+        .collect::<Vec<Bank>>()
+}
+
 #[tokio::main]
 async fn main() {
-    // prepare_dest_dir();
-    // let client = Client::new();
-    // let search_keys = "あい".chars();
-    // let result = fetch_all_bank_list(client, search_keys).await;
-    // save_bank_list(&result);
-    let bank = Bank::new(
-        "アイオー信用金庫".to_owned(),
-        "ｱｲｵ-ｼﾝｷﾝ".to_owned(),
-        "1206".to_owned(),
-        "1206xあ9".to_owned(),
-    );
     let client = Client::new();
-    let search_keys = "あいうえお".chars();
-    let result = fetch_all_branches(bank, client, search_keys).await;
-    println!("{:?}", &result);
+    let search_kesy = all_search_keys();
+    let banks = fetch_bulky(client, search_kesy).await;
+    save_bank_list(&banks);
+    println!("DONE");
 }
