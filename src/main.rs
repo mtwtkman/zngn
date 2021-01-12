@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::prelude::*;
 use std::path::Path;
@@ -21,11 +22,11 @@ enum Error {
     FechBranchError(reqwest::Error),
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq)]
 struct Bank {
     name: String,
     phonetic: String,
-    code: String,
+    code: BankCode,
     #[serde(skip)]
     search_param: String,
     branches: Vec<Branch>,
@@ -36,10 +37,14 @@ impl Bank {
         Self {
             name,
             phonetic,
-            code,
+            code: BankCode(code),
             search_param,
             branches: Vec::new(),
         }
+    }
+
+    fn append_branch(&mut self, branch: Branch) {
+        self.branches.push(branch)
     }
 
     async fn fetch_branches(&self, client: Client, search_key: char) -> Result<Vec<Branch>, Error> {
@@ -105,14 +110,24 @@ fn parse_branches(html: String) -> Vec<Branch> {
         .collect::<Vec<Branch>>()
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq)]
 struct Branch {
     name: String,
     phonetic: String,
     code: String,
 }
 
-async fn fetch_bank_list(client: Client, search_key: char) -> Result<Vec<Bank>, Error> {
+impl Branch {
+    fn new(name: String, phonetic: String, code: String) -> Self {
+        Self {
+            name,
+            phonetic,
+            code,
+        }
+    }
+}
+
+async fn fetch_banks(client: Client, search_key: char) -> Result<Vec<Bank>, Error> {
     let html = client
         .post("https://zengin.ajtw.net/ginkou.php")
         .form(&[("gm", &search_key.to_string())])
@@ -122,10 +137,10 @@ async fn fetch_bank_list(client: Client, search_key: char) -> Result<Vec<Bank>, 
         .text()
         .await
         .unwrap();
-    Ok(parse_bank_list(html))
+    Ok(parse_banks(html))
 }
 
-fn parse_bank_list(html: String) -> Vec<Bank> {
+fn parse_banks(html: String) -> Vec<Bank> {
     let document = Document::from(html.as_str());
     document
         .find(Class("j0").descendant(Name("tbody").descendant(Name("tr"))))
@@ -158,14 +173,14 @@ fn all_search_keys() -> Chars<'static> {
     "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわ".chars()
 }
 
-async fn fetch_all_bank_list(client: Client, search_keys: Chars<'static>) -> Vec<Bank> {
+async fn fetch_all_banks(client: Client, search_keys: Chars<'static>) -> Vec<Bank> {
     let future = futures::future::join_all(
         search_keys
             .clone()
             .map(|search_key| {
                 let client = client.clone();
                 tokio::spawn(async move {
-                    fetch_bank_list(client, search_key).await
+                    fetch_banks(client, search_key).await
                 })
             })
     );
@@ -178,47 +193,63 @@ async fn fetch_all_bank_list(client: Client, search_keys: Chars<'static>) -> Vec
         .collect::<Vec<Bank>>()
 }
 
-const BANK_LIST_JSON: &'static str = "dest/banks.json";
+const BANKS_JSON: &'static str = "dest/banks.json";
 
-fn save_bank_list(bank_list: &Vec<Bank>) {
-    let dest_path = Path::new(BANK_LIST_JSON);
+fn save_banks(banks: &Vec<Bank>) {
+    let dest_path = Path::new(BANKS_JSON);
     let mut file = File::create(dest_path).unwrap();
-    let _ = file.write_all(serde_json::to_string(bank_list).unwrap().as_bytes());
+    let _ = file.write_all(serde_json::to_string(banks).unwrap().as_bytes());
 }
 
-fn load_bank_list() -> Vec<Bank> {
-    let dest_path = Path::new(BANK_LIST_JSON);
+fn load_banks() -> Vec<Bank> {
+    let dest_path = Path::new(BANKS_JSON);
     let file = File::open(dest_path).unwrap();
     serde_json::from_reader(&file).unwrap()
 }
 
-async fn fetch_bulky(client: Client, search_keys: Chars<'static>) -> Vec<Bank> {
-    let banks = fetch_all_bank_list(client.clone(), search_keys.clone()).await;
-    let future = futures::future::join_all(
-        banks
-            .into_iter()
-            .map(|bank| {
-                let client = client.clone();
-                let search_keys = search_keys.clone();
-                tokio::spawn(async move {
-                    bank.fetch_all_branches(client, search_keys).await.unwrap()
-                })
-            })
-    );
-    future
-        .await
-        .into_iter()
-        .map(|task_result| {
-            task_result.unwrap()
-        })
-        .collect::<Vec<Bank>>()
+
+#[derive(Debug, Serialize, Eq, PartialEq, Hash, Clone, Deserialize)]
+struct BankCode(String);
+
+fn to_hashmap(banks: Vec<Bank>) -> HashMap<BankCode, Bank> {
+    let mut data = HashMap::new();
+    for bank in banks.into_iter() {
+        data.insert(bank.code.clone(), bank);
+    }
+    data
 }
 
 #[tokio::main]
 async fn main() {
     let client = Client::new();
     let search_kesy = all_search_keys();
-    let banks = fetch_bulky(client, search_kesy).await;
-    save_bank_list(&banks);
+    let banks = fetch_all_banks(client, search_kesy).await;
+    save_banks(&banks);
     println!("DONE");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn to_hashmap_test() {
+        use crate::{Bank, Branch, to_hashmap};
+
+        let mut bank1 = Bank::new("ねこ銀行".to_owned(), "ﾈｺ".to_owned(), "0222".to_owned(), "0x222".to_owned());
+        let branch1_1 = Branch::new("みけ支店".to_owned(), "ﾐｹ".to_owned(), "0123".to_owned());
+        let branch1_2 = Branch::new("とら支店".to_owned(), "ﾄﾗ".to_owned(), "0789".to_owned());
+        bank1.append_branch(branch1_1);
+        bank1.append_branch(branch1_2);
+
+        let mut bank2 = Bank::new("いぬ銀行".to_owned(), "ｲﾇ".to_owned(), "0111".to_owned(), "0x111".to_owned());
+        let branch2_1 = Branch::new("しば支店".to_owned(), "ｼﾊﾞ".to_owned(), "0345".to_owned());
+        let branch2_2 = Branch::new("かい支店".to_owned(), "ｶｲ".to_owned(), "0456".to_owned());
+        bank2.append_branch(branch2_1);
+        bank2.append_branch(branch2_2);
+
+        let banks = vec![bank1.clone(), bank2.clone()];
+
+        let result = to_hashmap(banks);
+        assert_eq!(result[&bank1.code], bank1);
+        assert_eq!(result[&bank2.code], bank2);
+    }
 }
