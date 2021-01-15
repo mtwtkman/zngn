@@ -20,6 +20,7 @@ fn prepare_dest_dir() {
 enum Error {
     FetchBankError(reqwest::Error),
     FechBranchError(reqwest::Error),
+    LoadBanksFileFailed(serde_json::Error),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq)]
@@ -198,33 +199,36 @@ const BANKS_JSON: &'static str = "dest/banks.json";
 fn save_banks(banks: &Vec<Bank>) {
     let dest_path = Path::new(BANKS_JSON);
     let mut file = File::create(dest_path).unwrap();
-    let _ = file.write_all(serde_json::to_string(banks).unwrap().as_bytes());
+    let data = to_hashmap(&banks);
+    let _ = file.write_all(serde_json::to_string(&data).unwrap().as_bytes());
 }
 
-fn load_banks() -> Vec<Bank> {
+fn load_banks() -> Result<HashMap<BankCode, Bank>, Error> {
     let dest_path = Path::new(BANKS_JSON);
     let file = File::open(dest_path).unwrap();
-    serde_json::from_reader(&file).unwrap()
+    serde_json::from_reader(&file).map_err(Error::LoadBanksFileFailed)
 }
 
 
-#[derive(Debug, Serialize, Eq, PartialEq, Hash, Clone, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Eq, PartialEq, Hash, Clone)]
 struct BankCode(String);
 
-fn to_hashmap(banks: Vec<Bank>) -> HashMap<BankCode, Bank> {
+fn to_hashmap(banks: &Vec<Bank>) -> HashMap<BankCode, Bank> {
     let mut data = HashMap::new();
-    for bank in banks.into_iter() {
-        data.insert(bank.code.clone(), bank);
+    for bank in banks.iter() {
+        data.insert(bank.code.clone(), bank.clone());
     }
     data
 }
 
 #[tokio::main]
 async fn main() {
-    let client = Client::new();
-    let search_kesy = all_search_keys();
-    let banks = fetch_all_banks(client, search_kesy).await;
-    save_banks(&banks);
+    // let client = Client::new();
+    // let search_keys = all_search_keys();
+    // let banks = fetch_all_banks(client, search_keys).await;
+    // save_banks(&banks);
+    let data = load_banks();
+    println!("{:?}", &data);
     println!("DONE");
 }
 
@@ -248,7 +252,7 @@ mod tests {
 
         let banks = vec![bank1.clone(), bank2.clone()];
 
-        let result = to_hashmap(banks);
+        let result = to_hashmap(&banks);
         assert_eq!(result[&bank1.code], bank1);
         assert_eq!(result[&bank2.code], bank2);
     }
