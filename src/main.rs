@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::prelude::*;
-use std::path::Path;
+use std::path::{PathBuf, Path};
 use std::str::Chars;
 
 use reqwest::Client;
@@ -12,8 +12,10 @@ use select::{
 };
 use serde::{Deserialize, Serialize};
 
+const BRANCHES_DIR: &'static str = "dest/branches";
+
 fn prepare_dest_dir() {
-    let _ = fs::create_dir("dest");
+    let _ = fs::create_dir_all(BRANCHES_DIR);
 }
 
 #[derive(Debug)]
@@ -21,6 +23,7 @@ enum Error {
     FetchBankError(reqwest::Error),
     FechBranchError(reqwest::Error),
     LoadBanksFileFailed(serde_json::Error),
+    SaveBankFileFaild(serde_json::Error),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq)]
@@ -44,8 +47,18 @@ impl Bank {
         }
     }
 
+    fn filepath(&self) -> PathBuf {
+        let mut path = PathBuf::new();
+        path.push(format!("{}.json", &self.code.0));
+        path
+    }
+
     fn append_branch(&mut self, branch: Branch) {
         self.branches.push(branch)
+    }
+
+    fn save_as_file(&self) {
+
     }
 
     async fn fetch_branches(&self, client: Client, search_key: char) -> Result<Vec<Branch>, Error> {
@@ -61,7 +74,7 @@ impl Bank {
         Ok(parse_branches(html))
     }
 
-    async fn fetch_all_branches(mut self, client: Client, search_keys: Chars<'static>) -> Result<Self, Error>{
+    async fn fetch_all_branches(&mut self, client: Client, search_keys: Chars<'static>) -> Result<Self, Error>{
         let future = futures::future::join_all(
             search_keys
                 .clone()
@@ -219,6 +232,14 @@ fn to_hashmap(banks: &Vec<Bank>) -> HashMap<BankCode, Bank> {
         data.insert(bank.code.clone(), bank.clone());
     }
     data
+}
+
+async fn iterate_banks(client: &Client, banks: &mut Vec<Bank>) {
+    for bank in banks.iter_mut() {
+        let client = client.clone();
+        let search_keys = all_search_keys();
+        let _ = bank.fetch_all_branches(client, search_keys).await;
+    }
 }
 
 #[tokio::main]
