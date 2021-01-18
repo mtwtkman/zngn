@@ -4,6 +4,7 @@ use std::io::prelude::*;
 use std::path::{PathBuf, Path};
 use std::str::Chars;
 
+use futures::stream::{StreamExt, iter as siter};
 use reqwest::Client;
 use select::{
     document::Document,
@@ -23,7 +24,7 @@ enum Error {
     FetchBankError(reqwest::Error),
     FechBranchError(reqwest::Error),
     LoadBanksFileFailed(serde_json::Error),
-    SaveBankFileFaild(serde_json::Error),
+    SaveBankFileFailed(std::io::Error),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq)]
@@ -47,6 +48,12 @@ impl Bank {
         }
     }
 
+    fn to_hashmap(&self) -> HashMap<BankCode, Self> {
+        let mut data = HashMap::new();
+        data.insert(self.code.clone(), self.clone());
+        data
+    }
+
     fn filepath(&self) -> PathBuf {
         let mut path = PathBuf::new();
         path.push(format!("{}.json", &self.code.0));
@@ -57,8 +64,16 @@ impl Bank {
         self.branches.push(branch)
     }
 
-    fn save_as_file(&self) {
-
+    async fn save_as_file(&self) -> Result<(), Error>{
+        let filepath = self.filepath();
+        let hashmap = self.to_hashmap();
+        let mut file = File::create(&filepath).map_err(Error::SaveBankFileFailed)?;
+        let data = serde_json::to_string(&hashmap).unwrap();
+        let mut stream = siter(data.as_bytes());
+        while let Some(content) = stream.next().await {
+            file.write(&[content.clone()]);
+        }
+        Ok(())
     }
 
     async fn fetch_branches(&self, client: Client, search_key: char) -> Result<Vec<Branch>, Error> {
@@ -229,17 +244,19 @@ struct BankCode(String);
 fn to_hashmap(banks: &Vec<Bank>) -> HashMap<BankCode, Bank> {
     let mut data = HashMap::new();
     for bank in banks.iter() {
-        data.insert(bank.code.clone(), bank.clone());
+        data.extend(bank.to_hashmap());
     }
     data
 }
 
-async fn iterate_banks(client: &Client, banks: &mut Vec<Bank>) {
+async fn iterate_banks(client: &Client, banks: &mut Vec<Bank>) -> Result<(), Error>{
     for bank in banks.iter_mut() {
         let client = client.clone();
         let search_keys = all_search_keys();
-        let _ = bank.fetch_all_branches(client, search_keys).await;
+        let bank = bank.fetch_all_branches(client, search_keys).await?;
+        bank.save_as_file().await?;
     }
+    Ok(())
 }
 
 #[tokio::main]
