@@ -69,9 +69,9 @@ impl Bank {
         let hashmap = self.to_hashmap();
         let mut file = File::create(&filepath).map_err(Error::SaveBankFileFailed)?;
         let data = serde_json::to_string(&hashmap).unwrap();
-        let mut stream = siter(data.as_bytes());
+        let mut stream = siter(data.as_bytes().chunks(100));
         while let Some(content) = stream.next().await {
-            file.write(&[content.clone()]);
+            file.write(content);
         }
         Ok(())
     }
