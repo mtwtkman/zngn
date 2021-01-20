@@ -32,7 +32,6 @@ struct Bank {
     name: String,
     phonetic: String,
     code: BankCode,
-    #[serde(skip)]
     search_param: String,
     branches: Vec<Branch>,
 }
@@ -261,12 +260,15 @@ async fn iterate_banks(client: &Client, banks: &mut Vec<Bank>) -> Result<(), Err
 
 #[tokio::main]
 async fn main() {
-    // let client = Client::new();
-    // let search_keys = all_search_keys();
-    // let banks = fetch_all_banks(client, search_keys).await;
-    // save_banks(&banks);
-    let data = load_banks();
-    println!("{:?}", &data);
+    let client = Client::new();
+    let search_keys = all_search_keys();
+    let banks = fetch_all_banks(client.clone(), search_keys).await;
+    save_banks(&banks);
+    let data = load_banks().unwrap();
+    let mut bank = data.get(&BankCode("2740".to_owned())).unwrap().clone();
+    let search_keys = "う".chars();
+    let branches = bank.fetch_all_branches(client.clone(), search_keys).await;
+    println!("{:?}", &branches);
     println!("DONE");
 }
 
