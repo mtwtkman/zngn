@@ -13,7 +13,7 @@ use select::{
 };
 use serde::{Deserialize, Serialize};
 
-const BRANCHES_DIR: &'static str = "dest/branches";
+const BRANCHES_DIR: &'static str = "dest";
 
 fn prepare_dest_dir() {
     let _ = fs::create_dir_all(BRANCHES_DIR);
@@ -55,6 +55,7 @@ impl Bank {
 
     fn filepath(&self) -> PathBuf {
         let mut path = PathBuf::new();
+        path.push(BRANCHES_DIR);
         path.push(format!("{}.json", &self.code.0));
         path
     }
@@ -267,8 +268,9 @@ async fn main() {
     let data = load_banks().unwrap();
     let mut bank = data.get(&BankCode("2740".to_owned())).unwrap().clone();
     let search_keys = "う".chars();
-    let branches = bank.fetch_all_branches(client.clone(), search_keys).await;
-    println!("{:?}", &branches);
+    let bank = bank.fetch_all_branches(client.clone(), search_keys).await;
+    println!("{:?}", &bank);
+    let _ = bank.unwrap().save_as_file().await;
     println!("DONE");
 }
 
